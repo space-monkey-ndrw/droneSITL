@@ -1,0 +1,31 @@
+# ROS2 / colcon build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# SITL / simulation logs
+*.log
+*.bin
+*.tlog
+logs/
+
+# Editor/OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# External dependencies (cloned separately, not part of this repo)
+Micro-XRCE-DDS-Agent/
+PX4-Autopilot/
+# other internal files
+backups/
+camera_frame.png
+camera_frame2.png
+
+
