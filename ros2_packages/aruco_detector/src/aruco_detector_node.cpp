@@ -1,8 +1,7 @@
 #include "aruco_detector/aruco_detector_node.hpp"
 #include <opencv2/imgproc.hpp>
 
-ArUcoDetectorNode::ArUcoDetectorNode()
-  : rclcpp::Node {"aruco_detector_node"}
+ArUcoDetectorNode::ArUcoDetectorNode() : rclcpp::Node {"aruco_detector_node"}
 {
   // Initialize ArUco dictionary (OpenCV 4.6 old API)
   dictionary_ = cv::aruco::getPredefinedDictionary(cv::aruco::DICT_4X4_50);
@@ -77,9 +76,7 @@ void ArUcoDetectorNode::imageCallback(
   detectAndPublishPose(cv_ptr->image, image_msg->header);
 }
 
-void ArUcoDetectorNode::detectAndPublishPose(
-  const cv::Mat& image,
-  const std_msgs::msg::Header& header)
+void ArUcoDetectorNode::detectAndPublishPose(const cv::Mat& image, const std_msgs::msg::Header& header)
 {
   if (!camera_info_received_) {
     return;  // Wait for camera calibration
@@ -101,7 +98,7 @@ void ArUcoDetectorNode::detectAndPublishPose(
     return;
   }
   
-  RCLCPP_INFO(this->get_logger(), "Detected %lu marker(s)", ids.size());
+  RCLCPP_DEBUG(this->get_logger(), "Detected %lu marker(s)", ids.size());
   
   // Estimate pose for each marker using OpenCV 4.6 old API
   std::vector<cv::Vec3d> rvecs, tvecs;
