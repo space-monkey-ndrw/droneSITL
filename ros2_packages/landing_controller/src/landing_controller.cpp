@@ -13,6 +13,8 @@ LandingController::LandingController() : Node {"landing_controller"} {
 
     local_position_subscriber_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>("/fmu/out/vehicle_local_position_v1", qos_profile, std::bind(&LandingController::local_position_callback, this, std::placeholders::_1));
 
+    attitude_subscriber_ = this->create_subscription<px4_msgs::msg::VehicleAttitude>("/fmu/out/vehicle_attitude_v1", qos_profile, std::bind(&LandingController::attitude_callback, this, std::placeholders::_1));
+
     trajectory_publisher_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>("/fmu/in/trajectory_setpoint", qos_profile);
 
     offboard_control_mode_publisher_ = this->create_publisher<px4_msgs::msg::OffboardControlMode>("/fmu/in/offboard_control_mode", qos_profile);
@@ -43,6 +45,32 @@ void LandingController::pose_callback(const geometry_msgs::msg::PoseStamped::Sha
 
     RCLCPP_DEBUG(this->get_logger(), "pose passed sanity checks");
 
+    // step 1: camera frame -> body frame
+    // camera: +x right, +y down, +z forward (out of camera lens, towards ground)
+    // body: image-up = body-forward, image-right = body-right
+    float x_body = -y_dist;
+    float y_body =  x_dist;
+    float z_body =  z_dist;
+
+    // step 2: body FRD -> level-body frame (remove roll/pitch tilt)
+    float sr = std::sin(current_roll_), cr = std::cos(current_roll_);
+    float sp = std::sin(current_pitch_), cp = std::cos(current_pitch_);
+
+    // Rx (roll) applied first
+    float x1 = x_body;
+    float y1 = y_body * cr - z_body * sr;
+    float z1 = y_body * sr + z_body * cr;
+
+    // then Ry (pitch)
+    float x_level = x1 * cp + z1 * sp;
+    float y_level = y1;
+    float z_level = -x1 * sp + z1 * cp;
+
+    // step 3: level-body frame -> back to camera frame (keeps downstream PID unchanged)
+    x_dist = y_level;
+    y_dist = -x_level;
+    z_dist = z_level;
+
     if(!filter_initialized_) {
         filtered_x_ = x_dist;
         filtered_y_ = y_dist;
@@ -58,7 +86,7 @@ void LandingController::pose_callback(const geometry_msgs::msg::PoseStamped::Sha
         }
     }
 
-    RCLCPP_INFO(this->get_logger(), "raw x=%.3f y=%.3f z=%.3f | filtered: x=%.3f y=%.3f z=%.3f", x_dist, y_dist, z_dist, filtered_x_, filtered_y_, filtered_z_);
+    // RCLCPP_INFO(this->get_logger(), "raw x=%.3f y=%.3f z=%.3f | filtered: x=%.3f y=%.3f z=%.3f", x_dist, y_dist, z_dist, filtered_x_, filtered_y_, filtered_z_);
 
     // get time stamp after sanity checks (rejected poses are not 'fresh')
     last_pose_stamp_ = rclcpp::Time(msg->header.stamp);
@@ -84,11 +112,27 @@ void LandingController::land_detected_callback(const px4_msgs::msg::VehicleLandD
     is_landed_ = msg->landed;
 }
 
+void LandingController::attitude_callback(const px4_msgs::msg::VehicleAttitude::SharedPtr msg) {
+    float w = msg->q[0], x = msg->q[1], y = msg->q[2], z = msg->q[3];
+
+    current_roll_ = std::atan2(2.0f * (w*x + y*z), 1.0f - 2.0f * (x*x + y*y));
+    float sin_pitch = 2.0f * (w*y - z*x);
+    current_pitch_ = std::asin(std::clamp(sin_pitch, -1.0f, 1.0f));
+
+    have_attitude_ = true;
+}
+
 void LandingController::update_state() {
     switch (current_state_) {
+    case State::SEARCH:
+        if (have_pose_) {
+            RCLCPP_DEBUG(this->get_logger(), "marker acquired - transitioning to APPROACH");
+            current_state_ = State::APPROACH;
+        }
+        break;
     case State::APPROACH:
         if (have_local_position_ && current_altitude_ < kLandAltitudeThreshold_) {
-            RCLCPP_INFO(this->get_logger(), "Altitude threshold crossed (%.3f < %.1f) - transitioning to LAND", current_altitude_, kLandAltitudeThreshold_);
+            RCLCPP_DEBUG(this->get_logger(), "Altitude threshold crossed (%.3f < %.1f) - transitioning to LAND", current_altitude_, kLandAltitudeThreshold_);
             current_state_ = State::LAND;
 
             integral_x_ = 0.0f;
@@ -98,7 +142,7 @@ void LandingController::update_state() {
     
     case State::LAND:
         if (is_landed_) {
-            RCLCPP_INFO(this->get_logger(), "transitioning to LANDED");
+            RCLCPP_DEBUG(this->get_logger(), "transitioning to LANDED");
             current_state_ = State::LANDED;
             send_disarm_command();
         }
@@ -147,6 +191,24 @@ void LandingController::control_loop() {
 
     float vx_ned = 0.0f, vy_ned = 0.0f, vz = 0.0f;
 
+    if (current_state_ == State::SEARCH) {
+        if (!search_started_) {
+            search_start_time_ = this->now();
+            search_started_ = true;
+        }
+
+        float elapsed = (this->now() - search_start_time_).seconds();
+        float theta = kSpiralOmega_ * elapsed;
+        float r = std::min(kSpiralGrowthRate_ * theta, kSpiralMaxRadius_);
+
+        bool still_growing = (r < kSpiralMaxRadius_);
+        float dr_dt = still_growing ? (kSpiralGrowthRate_ * kSpiralOmega_) : 0.0f;
+
+        vx_ned = dr_dt * cos(theta) - r * sin(theta) * kSpiralOmega_;
+        vy_ned = dr_dt * sin(theta) + r * cos(theta) * kSpiralOmega_;
+        vz = 0.0f;
+    }
+
     if (have_pose_) {
         // check age of pose
         auto pose_age = this->now() - last_pose_stamp_; // rclcpp::Time - rclcpp::Time returns as an rclcpp::Duration
@@ -170,12 +232,33 @@ void LandingController::control_loop() {
             }
         } else if (current_state_ == State::APPROACH) {
             // integral accumulation = running total of error over time
-            integral_x_ += filtered_x_ * dt;
-            integral_y_ += filtered_y_ * dt;
+            RCLCPP_DEBUG(this->get_logger(), "dt: %.3f, integral_x_: %.3f, filtered_x_: %.3f, integral_y_: %.3f, filtered_y_: %.3f", dt, integral_x_, filtered_x_, integral_y_, filtered_y_);
+            if (std::abs(filtered_x_) < kIntegralActivationThreshold) {
+                integral_x_ += filtered_x_ * dt;
+                if (integral_x_ * filtered_x_ < 0.0f) {
+                    integral_x_ *= 0.5f;
+                }
+                integral_x_ = std::clamp(integral_x_,  -kIntegralMax_ / Ki_lateral_, kIntegralMax_ / Ki_lateral_);
+            } else {
+                integral_x_ = 0.0f;
+            }
+            if (std::abs(filtered_y_) < kIntegralActivationThreshold) {
+                integral_y_ += filtered_y_ * dt;
+                if (integral_y_ * filtered_y_ < 0.0f) {
+                    integral_y_ *= 0.5f;
+                }
+                integral_y_ = std::clamp(integral_y_,  -kIntegralMax_ / Ki_lateral_, kIntegralMax_ / Ki_lateral_);
+            } else {
+                integral_y_ = 0.0f;
+            }
+            RCLCPP_DEBUG(this->get_logger(), "after integration, before clamp integral_x_: %.3f, integral_y_: %.3f", integral_x_, integral_y_);
 
             // anti-windup - clamp accumulated integral
-            integral_y_ = std::clamp(integral_y_, -kIntegralMax_, kIntegralMax_);
-            integral_x_ = std::clamp(integral_x_, -kIntegralMax_, kIntegralMax_);
+            float i_x = std::clamp(integral_x_ * Ki_lateral_, -kIntegralMax_, kIntegralMax_);
+            float i_y = std::clamp(integral_y_ * Ki_lateral_, -kIntegralMax_, kIntegralMax_);
+            // integral_y_ = std::clamp(integral_y_, -kIntegralMax_, kIntegralMax_);
+            // integral_x_ = std::clamp(integral_x_, -kIntegralMax_, kIntegralMax_);
+            RCLCPP_DEBUG(this->get_logger(), "after clamp i_x: %.3f, i_y: %.3f", i_x, i_y);
 
             float derivative_x = 0.0f, derivative_y = 0.0f;
             if (derivative_initialized_ && dt > 0.0f) {
@@ -198,24 +281,28 @@ void LandingController::control_loop() {
             }
 
             // calculate velocities (camera frame x, y offset -> body frame velocity)
-            float vx = -filtered_y_ * K_lateral_ - integral_y_ * Ki_lateral_ - filtered_derivative_y_ * Kd_lateral_; // y offset -> x velocity (forward/back)
-            float vy = filtered_x_ * K_lateral_ + integral_x_ * Ki_lateral_ + filtered_derivative_x_ * Kd_lateral_; // x offset -> y velocity (left/right)
-            vz = (current_state_ == State::LAND) ? kLandDescentVelocity_ : (filtered_z_ * K_descent_);
+            float vx = -filtered_y_ * K_lateral_ - i_y - filtered_derivative_y_ * Kd_lateral_; // +y offset -> -x velocity (go backwards)
+            float vy = filtered_x_ * K_lateral_ + i_x + filtered_derivative_x_ * Kd_lateral_; // +x offset -> +y velocity (go right)
+            vz = (current_state_ == State::LAND) ? kLandDescentVelocity_ : (filtered_z_ * K_descent_); // vz proportional to height of drone in meters - 60m is roughly max detection distance of aruco marker
+
+            RCLCPP_INFO(this->get_logger(), "drone forward=%.3f right=%.3f", -latest_y_, latest_x_);
 
             float p_contrib_x = filtered_x_ * K_lateral_;
-            float i_contrib_x = integral_x_ * Ki_lateral_;
+            // float i_contrib_x = integral_x_ * Ki_lateral_;
+            float i_contrib_x = i_x;
             float d_contrib_x = derivative_x * Kd_lateral_;
-            // RCLCPP_INFO(this->get_logger(), "vy=%.3f | P=%.3f I=%.3f D=%.3f", vy, p_contrib_x, i_contrib_x, d_contrib_x);
+            RCLCPP_INFO(this->get_logger(), "v right=%.3f | P=%.3f I=%.3f D=%.3f", vy, p_contrib_x, i_contrib_x, d_contrib_x);
 
             float p_contrib_y = -filtered_y_ * K_lateral_;
-            float i_contrib_y = -integral_y_ * Ki_lateral_;
+            // float i_contrib_y = -integral_y_ * Ki_lateral_;
+            float i_contrib_y = -i_y;
             float d_contrib_y = -derivative_y * Kd_lateral_;
-            // RCLCPP_INFO(this->get_logger(), "vx=%.3f | P=%.3f I=%.3f D=%.3f", vx, p_contrib_y, i_contrib_y, d_contrib_y);
+            RCLCPP_INFO(this->get_logger(), "v forward=%.3f | P=%.3f I=%.3f D=%.3f\n", vx, p_contrib_y, i_contrib_y, d_contrib_y);
 
-            // add rotation
+            // add rotation (body frame -> NED)
             vx_ned = vx * cos(current_yaw_) - vy * sin(current_yaw_);
             vy_ned = vx * sin(current_yaw_) + vy * cos(current_yaw_);
-            RCLCPP_INFO(this->get_logger(), "vx_ned=%.3f vy_ned=%.3f | vehicle x=%.3f y=%.3f | yaw=%.4f", vx_ned, vy_ned, vehicle_x_, vehicle_y_, current_yaw_);
+            RCLCPP_DEBUG(this->get_logger(), "vx_ned=%.3f vy_ned=%.3f | vehicle x=%.3f y=%.3f | yaw=%.4f", vx_ned, vy_ned, vehicle_x_, vehicle_y_, current_yaw_);
         } else {  // have pose, pose is fresh, not in APPROACH state
             vx_ned = 0.0f;
             vy_ned = 0.0f;
@@ -244,7 +331,7 @@ void LandingController::control_loop() {
 
     trajectory_publisher_->publish(trajectory_msg);
 
-    RCLCPP_INFO(this->get_logger(), "Published: vx_ned = %.3f, vy_ned = %.3f, vz = %.3f", vx_ned, vy_ned, vz);
+    RCLCPP_DEBUG(this->get_logger(), "Published: vx_ned = %.3f, vy_ned = %.3f, vz = %.3f\n", vx_ned, vy_ned, vz);
 }
 
 int main(int argc, char * argv[]) {
