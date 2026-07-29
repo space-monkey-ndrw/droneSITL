@@ -1,4 +1,5 @@
 #include "landing_controller.hpp"
+#include "landing_math.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -13,7 +14,7 @@ LandingController::LandingController() : Node {"landing_controller"} {
 
     local_position_subscriber_ = this->create_subscription<px4_msgs::msg::VehicleLocalPosition>("/fmu/out/vehicle_local_position_v1", qos_profile, std::bind(&LandingController::local_position_callback, this, std::placeholders::_1));
 
-    attitude_subscriber_ = this->create_subscription<px4_msgs::msg::VehicleAttitude>("/fmu/out/vehicle_attitude_v1", qos_profile, std::bind(&LandingController::attitude_callback, this, std::placeholders::_1));
+    attitude_subscriber_ = this->create_subscription<px4_msgs::msg::VehicleAttitude>("/fmu/out/vehicle_attitude", qos_profile, std::bind(&LandingController::attitude_callback, this, std::placeholders::_1));
 
     trajectory_publisher_ = this->create_publisher<px4_msgs::msg::TrajectorySetpoint>("/fmu/in/trajectory_setpoint", qos_profile);
 
@@ -45,31 +46,39 @@ void LandingController::pose_callback(const geometry_msgs::msg::PoseStamped::Sha
 
     RCLCPP_DEBUG(this->get_logger(), "pose passed sanity checks");
 
+    Vec3 corrected = derotate_camera_to_level({x_dist, y_dist, z_dist}, current_roll_, current_pitch_);
+
+    RCLCPP_INFO(this->get_logger(), "raw=(%.3f,%.3f,%.3f) corrected=(%.3f,%.3f,%.3f) roll=%.3f pitch=%.3f", x_dist, y_dist, z_dist, corrected.x, corrected.y, corrected.z, current_roll_, current_pitch_);
+
+    x_dist = corrected.x;
+    y_dist = corrected.y;
+    z_dist = corrected.z;
+
     // step 1: camera frame -> body frame
     // camera: +x right, +y down, +z forward (out of camera lens, towards ground)
-    // body: image-up = body-forward, image-right = body-right
-    float x_body = -y_dist;
-    float y_body =  x_dist;
-    float z_body =  z_dist;
+    // body: image-up = body-forward (+x body is -y image), image-right = body-right (+y body is +x image)
+    // float x_body = -y_dist;
+    // float y_body =  x_dist;
+    // float z_body =  z_dist;
 
     // step 2: body FRD -> level-body frame (remove roll/pitch tilt)
-    float sr = std::sin(current_roll_), cr = std::cos(current_roll_);
-    float sp = std::sin(current_pitch_), cp = std::cos(current_pitch_);
+    // float sr = std::sin(current_roll_), cr = std::cos(current_roll_);
+    // float sp = std::sin(current_pitch_), cp = std::cos(current_pitch_);
 
     // Rx (roll) applied first
-    float x1 = x_body;
-    float y1 = y_body * cr - z_body * sr;
-    float z1 = y_body * sr + z_body * cr;
+    // float x1 = x_body;
+    // float y1 = y_body * cr - z_body * sr;
+    // float z1 = y_body * sr + z_body * cr;
 
     // then Ry (pitch)
-    float x_level = x1 * cp + z1 * sp;
-    float y_level = y1;
-    float z_level = -x1 * sp + z1 * cp;
+    // float x_level = x1 * cp + z1 * sp;
+    // float y_level = y1;
+    // float z_level = -x1 * sp + z1 * cp;
 
     // step 3: level-body frame -> back to camera frame (keeps downstream PID unchanged)
-    x_dist = y_level;
-    y_dist = -x_level;
-    z_dist = z_level;
+    // x_dist = y_level;
+    // y_dist = -x_level;
+    // z_dist = z_level;
 
     if(!filter_initialized_) {
         filtered_x_ = x_dist;
@@ -105,7 +114,7 @@ void LandingController::local_position_callback(const px4_msgs::msg::VehicleLoca
     current_altitude_ = -msg->z;  // NED - +z is below starting positiong, -z is above
     have_local_position_ = true;
     vehicle_x_ = msg->x;
-    vehicle_y_ = msg->y;
+    vehicle_y_ = msg->y;   
 }
 
 void LandingController::land_detected_callback(const px4_msgs::msg::VehicleLandDetected::SharedPtr msg) {
@@ -113,11 +122,15 @@ void LandingController::land_detected_callback(const px4_msgs::msg::VehicleLandD
 }
 
 void LandingController::attitude_callback(const px4_msgs::msg::VehicleAttitude::SharedPtr msg) {
-    float w = msg->q[0], x = msg->q[1], y = msg->q[2], z = msg->q[3];
+    quat_to_roll_pitch(msg->q[0], msg->q[1], msg->q[2], msg->q[3], current_roll_, current_pitch_);
 
-    current_roll_ = std::atan2(2.0f * (w*x + y*z), 1.0f - 2.0f * (x*x + y*y));
-    float sin_pitch = 2.0f * (w*y - z*x);
-    current_pitch_ = std::asin(std::clamp(sin_pitch, -1.0f, 1.0f));
+    RCLCPP_INFO(this->get_logger(), "roll=%.3f pitch=%.3f", current_roll_, current_pitch_);
+    
+    // float w = msg->q[0], x = msg->q[1], y = msg->q[2], z = msg->q[3];
+
+    // current_roll_ = std::atan2(2.0f * (w*x + y*z), 1.0f - 2.0f * (x*x + y*y));
+    // float sin_pitch = 2.0f * (w*y - z*x);
+    // current_pitch_ = std::asin(std::clamp(sin_pitch, -1.0f, 1.0f));
 
     have_attitude_ = true;
 }
@@ -198,14 +211,19 @@ void LandingController::control_loop() {
         }
 
         float elapsed = (this->now() - search_start_time_).seconds();
-        float theta = kSpiralOmega_ * elapsed;
-        float r = std::min(kSpiralGrowthRate_ * theta, kSpiralMaxRadius_);
+        Vec3 v = spiral_velocity(elapsed, kSpiralOmega_, kSpiralGrowthRate_, kSpiralMaxRadius_);
 
-        bool still_growing = (r < kSpiralMaxRadius_);
-        float dr_dt = still_growing ? (kSpiralGrowthRate_ * kSpiralOmega_) : 0.0f;
+        // float theta = kSpiralOmega_ * elapsed;
+        // float r = std::min(kSpiralGrowthRate_ * theta, kSpiralMaxRadius_);
 
-        vx_ned = dr_dt * cos(theta) - r * sin(theta) * kSpiralOmega_;
-        vy_ned = dr_dt * sin(theta) + r * cos(theta) * kSpiralOmega_;
+        // bool still_growing = (r < kSpiralMaxRadius_);
+        // float dr_dt = still_growing ? (kSpiralGrowthRate_ * kSpiralOmega_) : 0.0f;
+
+        // vx_ned = dr_dt * cos(theta) - r * sin(theta) * kSpiralOmega_;
+        // vy_ned = dr_dt * sin(theta) + r * cos(theta) * kSpiralOmega_;
+
+        vx_ned = v.x;
+        vy_ned = v.y;
         vz = 0.0f;
     }
 
