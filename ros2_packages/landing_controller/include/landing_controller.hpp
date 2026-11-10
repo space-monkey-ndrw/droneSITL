@@ -68,15 +68,15 @@ private:
 
     // proportional gain
     static constexpr float K_lateral_ {0.2f}; // .1 has almost no zigzag, .2 has some, .5 has a lot
-    static constexpr float K_descent_ {0.7f};
+    static constexpr float K_descent_ {0.9f};
 
-    static constexpr float Ki_lateral_ {0.01f};  // placeholder — tuned later in step 3
+    static constexpr float Ki_lateral_ {0.05f};  // placeholder — tuned later in step 3
+    static constexpr float kIntegralMax_ {0.3f}; // placeholder cap — tune in step 3 (gain-tuning pass)
+    static constexpr float kIntegralActivationThreshold {0.3f}; // don't calculate or use integral until we're close the marker
+
+    static constexpr float Kd_lateral_ {0.1f};
+
     rclcpp::Time last_control_time_ {static_cast<int64_t>(0), RCL_ROS_TIME};
-    static constexpr float kIntegralMax_ {0.2f}; // placeholder cap — tune in step 3 (gain-tuning pass)
-    static constexpr float kIntegralActivationThreshold {0.25f}; // don't calculate / use integral until we're close the marker
-
-    static constexpr float Kd_lateral_ {0.05f};
-
     rclcpp::Time search_start_time_ {static_cast<int64_t>(0), RCL_ROS_TIME};
     bool search_started_ {false};
 

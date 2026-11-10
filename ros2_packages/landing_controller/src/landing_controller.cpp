@@ -48,37 +48,11 @@ void LandingController::pose_callback(const geometry_msgs::msg::PoseStamped::Sha
 
     Vec3 corrected = derotate_camera_to_level({x_dist, y_dist, z_dist}, current_roll_, current_pitch_);
 
-    RCLCPP_INFO(this->get_logger(), "raw=(%.3f,%.3f,%.3f) corrected=(%.3f,%.3f,%.3f) roll=%.3f pitch=%.3f", x_dist, y_dist, z_dist, corrected.x, corrected.y, corrected.z, current_roll_, current_pitch_);
+    RCLCPP_INFO(this->get_logger(), "pose callback: raw=(%.3f,%.3f,%.3f) corrected=(%.3f,%.3f,%.3f) roll=%.3f pitch=%.3f", x_dist, y_dist, z_dist, corrected.x, corrected.y, corrected.z, current_roll_, current_pitch_);
 
     x_dist = corrected.x;
     y_dist = corrected.y;
     z_dist = corrected.z;
-
-    // step 1: camera frame -> body frame
-    // camera: +x right, +y down, +z forward (out of camera lens, towards ground)
-    // body: image-up = body-forward (+x body is -y image), image-right = body-right (+y body is +x image)
-    // float x_body = -y_dist;
-    // float y_body =  x_dist;
-    // float z_body =  z_dist;
-
-    // step 2: body FRD -> level-body frame (remove roll/pitch tilt)
-    // float sr = std::sin(current_roll_), cr = std::cos(current_roll_);
-    // float sp = std::sin(current_pitch_), cp = std::cos(current_pitch_);
-
-    // Rx (roll) applied first
-    // float x1 = x_body;
-    // float y1 = y_body * cr - z_body * sr;
-    // float z1 = y_body * sr + z_body * cr;
-
-    // then Ry (pitch)
-    // float x_level = x1 * cp + z1 * sp;
-    // float y_level = y1;
-    // float z_level = -x1 * sp + z1 * cp;
-
-    // step 3: level-body frame -> back to camera frame (keeps downstream PID unchanged)
-    // x_dist = y_level;
-    // y_dist = -x_level;
-    // z_dist = z_level;
 
     if(!filter_initialized_) {
         filtered_x_ = x_dist;
@@ -95,7 +69,7 @@ void LandingController::pose_callback(const geometry_msgs::msg::PoseStamped::Sha
         }
     }
 
-    // RCLCPP_INFO(this->get_logger(), "raw x=%.3f y=%.3f z=%.3f | filtered: x=%.3f y=%.3f z=%.3f", x_dist, y_dist, z_dist, filtered_x_, filtered_y_, filtered_z_);
+    RCLCPP_INFO(this->get_logger(), "raw x=%.3f y=%.3f z=%.3f | filtered: x=%.3f y=%.3f z=%.3f", x_dist, y_dist, z_dist, filtered_x_, filtered_y_, filtered_z_);
 
     // get time stamp after sanity checks (rejected poses are not 'fresh')
     last_pose_stamp_ = rclcpp::Time(msg->header.stamp);
@@ -124,7 +98,7 @@ void LandingController::land_detected_callback(const px4_msgs::msg::VehicleLandD
 void LandingController::attitude_callback(const px4_msgs::msg::VehicleAttitude::SharedPtr msg) {
     quat_to_roll_pitch(msg->q[0], msg->q[1], msg->q[2], msg->q[3], current_roll_, current_pitch_);
 
-    RCLCPP_INFO(this->get_logger(), "roll=%.3f pitch=%.3f", current_roll_, current_pitch_);
+    RCLCPP_INFO(this->get_logger(), "attitude callback: roll=%.3f pitch=%.3f", current_roll_, current_pitch_);
     
     // float w = msg->q[0], x = msg->q[1], y = msg->q[2], z = msg->q[3];
 
@@ -303,19 +277,19 @@ void LandingController::control_loop() {
             float vy = filtered_x_ * K_lateral_ + i_x + filtered_derivative_x_ * Kd_lateral_; // +x offset -> +y velocity (go right)
             vz = (current_state_ == State::LAND) ? kLandDescentVelocity_ : (filtered_z_ * K_descent_); // vz proportional to height of drone in meters - 60m is roughly max detection distance of aruco marker
 
-            RCLCPP_INFO(this->get_logger(), "drone forward=%.3f right=%.3f", -latest_y_, latest_x_);
+            RCLCPP_INFO(this->get_logger(), "control loop: needs drone forward=%.3f right=%.3f", -latest_y_, latest_x_);
 
             float p_contrib_x = filtered_x_ * K_lateral_;
             // float i_contrib_x = integral_x_ * Ki_lateral_;
             float i_contrib_x = i_x;
             float d_contrib_x = derivative_x * Kd_lateral_;
-            RCLCPP_INFO(this->get_logger(), "v right=%.3f | P=%.3f I=%.3f D=%.3f", vy, p_contrib_x, i_contrib_x, d_contrib_x);
+            RCLCPP_INFO(this->get_logger(), "control loop: v right=%.3f | P=%.3f I=%.3f D=%.3f", vy, p_contrib_x, i_contrib_x, d_contrib_x);
 
             float p_contrib_y = -filtered_y_ * K_lateral_;
             // float i_contrib_y = -integral_y_ * Ki_lateral_;
             float i_contrib_y = -i_y;
             float d_contrib_y = -derivative_y * Kd_lateral_;
-            RCLCPP_INFO(this->get_logger(), "v forward=%.3f | P=%.3f I=%.3f D=%.3f\n", vx, p_contrib_y, i_contrib_y, d_contrib_y);
+            RCLCPP_INFO(this->get_logger(), "control loop: v forward=%.3f | P=%.3f I=%.3f D=%.3f\n", vx, p_contrib_y, i_contrib_y, d_contrib_y);
 
             // add rotation (body frame -> NED)
             vx_ned = vx * cos(current_yaw_) - vy * sin(current_yaw_);

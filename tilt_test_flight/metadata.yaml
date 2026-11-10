@@ -2,10 +2,10 @@ rosbag2_bagfile_information:
   version: 9
   storage_identifier: mcap
   duration:
-    nanoseconds: 95959950434
+    nanoseconds: 67363791451
   starting_time:
-    nanoseconds_since_epoch: 1785268616385047097
-  message_count: 5632
+    nanoseconds_since_epoch: 1785356704439580929
+  message_count: 7821
   topics_with_message_count:
     - topic_metadata:
         name: /aruco_pose
@@ -28,7 +28,7 @@ rosbag2_bagfile_information:
               nsec: 854775807
             avoid_ros_namespace_conventions: false
         type_description_hash: RIHS01_10f3786d7d40fd2b54367835614bff85d4ad3b5dab62bf8bca0cc232d73b4cd8
-      message_count: 727
+      message_count: 1009
     - topic_metadata:
         name: /fmu/out/vehicle_local_position_v1
         type: px4_msgs/msg/VehicleLocalPosition
@@ -50,7 +50,7 @@ rosbag2_bagfile_information:
               nsec: 854775807
             avoid_ros_namespace_conventions: false
         type_description_hash: ""
-      message_count: 4799
+      message_count: 3369
     - topic_metadata:
         name: /fmu/out/vehicle_land_detected
         type: px4_msgs/msg/VehicleLandDetected
@@ -72,7 +72,29 @@ rosbag2_bagfile_information:
               nsec: 854775807
             avoid_ros_namespace_conventions: false
         type_description_hash: ""
-      message_count: 106
+      message_count: 74
+    - topic_metadata:
+        name: /fmu/out/vehicle_attitude
+        type: px4_msgs/msg/VehicleAttitude
+        serialization_format: cdr
+        offered_qos_profiles:
+          - history: keep_last
+            depth: 1
+            reliability: best_effort
+            durability: transient_local
+            deadline:
+              sec: 9223372036
+              nsec: 854775807
+            lifespan:
+              sec: 9223372036
+              nsec: 854775807
+            liveliness: automatic
+            liveliness_lease_duration:
+              sec: 9223372036
+              nsec: 854775807
+            avoid_ros_namespace_conventions: false
+        type_description_hash: ""
+      message_count: 3369
   compression_format: ""
   compression_mode: ""
   relative_file_paths:
@@ -80,9 +102,9 @@ rosbag2_bagfile_information:
   files:
     - path: tilt_test_flight_0.mcap
       starting_time:
-        nanoseconds_since_epoch: 1785268616385047097
+        nanoseconds_since_epoch: 1785356704439580929
       duration:
-        nanoseconds: 95959950434
-      message_count: 5632
+        nanoseconds: 67363791451
+      message_count: 7821
   custom_data: ~
   ros_distro: jazzy
